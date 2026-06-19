@@ -441,7 +441,6 @@ impl Cipher {
 
     pub async fn save(&mut self, conn: &DbConn) -> EmptyResult {
         self.update_users_revision(conn).await;
-        self.updated_at = Utc::now().naive_utc();
 
         db_run! { conn:
             sqlite, mysql {

@@ -298,6 +298,10 @@ pub struct CipherData {
     // updating an existing cipher.
     last_known_revision_date: Option<String>,
     archived_date: Option<String>,
+
+    // These are used during import to preserve original timestamps
+    creation_date: Option<String>,
+    revision_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -420,7 +424,7 @@ pub async fn update_cipher_from_data(
     // Check that the client isn't updating an existing cipher with stale data.
     // And only perform this check when not importing ciphers, else the date/time check will fail.
     if ut != UpdateType::None
-        && let Some(dt) = data.last_known_revision_date
+        && let Some(ref dt) = data.last_known_revision_date
     {
         match NaiveDateTime::parse_from_str(&dt, "%+") {
             // ISO 8601 format
@@ -530,6 +534,32 @@ pub async fn update_cipher_from_data(
     cipher.data = type_data.to_string();
     cipher.password_history = data.password_history.map(|f| f.to_string());
     cipher.reprompt = data.reprompt.filter(|r| *r == RepromptType::None as i32 || *r == RepromptType::Password as i32);
+
+    // For imports, preserve original creation/revision dates
+    // Official clients send revisionDate as lastKnownRevisionDate but drop creationDate.
+    // Custom import scripts may send both creation_date and revision_date explicitly.
+    if ut == UpdateType::None {
+        // Prefer the explicit import fields first, then fall back to lastKnownRevisionDate
+        let revision_dt = data.revision_date.as_deref().or(data.last_known_revision_date.as_deref());
+
+        if let Some(ref creation_str) = data.creation_date {
+            if let Ok(created_at) = NaiveDateTime::parse_from_str(creation_str, "%+") {
+                cipher.created_at = created_at;
+            }
+        } else if let Some(dt_str) = revision_dt {
+            if let Ok(dt) = NaiveDateTime::parse_from_str(dt_str, "%+") {
+                cipher.created_at = dt;
+            }
+        }
+
+        if let Some(dt_str) = revision_dt {
+            if let Ok(dt) = NaiveDateTime::parse_from_str(dt_str, "%+") {
+                cipher.updated_at = dt;
+            }
+        }
+    } else {
+        cipher.updated_at = Utc::now().naive_utc();
+    }
 
     cipher.save(conn).await?;
     cipher.move_to_folder(data.folder_id, &headers.user.uuid, conn).await?;
@@ -1784,6 +1814,7 @@ async fn delete_cipher_by_uuid(
 
     if *delete_options == CipherDeleteOptions::SoftSingle || *delete_options == CipherDeleteOptions::SoftMulti {
         cipher.deleted_at = Some(Utc::now().naive_utc());
+        cipher.updated_at = Utc::now().naive_utc();
         cipher.save(conn).await?;
         if *delete_options == CipherDeleteOptions::SoftSingle {
             nt.send_cipher_update(
@@ -1870,6 +1901,7 @@ async fn restore_cipher_by_uuid(
     }
 
     cipher.deleted_at = None;
+    cipher.updated_at = Utc::now().naive_utc();
     cipher.save(conn).await?;
 
     if !multi_restore {
